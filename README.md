@@ -44,6 +44,27 @@ terraform -chdir=infra/eks apply -var-file=local.tfvars
 aws eks update-kubeconfig --profile eks-lab-operator --region us-east-1 --name eks-gitops-lab --alias eks-gitops-lab
 ```
 
+### Install the platform Helm charts
+
+EKS bootstraps an `aws-node` DaemonSet. The first Helm install adopts it in place with `--take-ownership`. Use this for the lab's self-managed VPC CNI. An EKS-managed `vpc-cni` add-on needs a separate migration. Helm upgrades can roll the CNI pods. Keep the VPC ID dynamic so this also works after a rebuild.
+
+```sh
+vpc=$(aws eks describe-cluster --region us-east-1 --name eks-gitops-lab --query cluster.resourcesVpcConfig.vpcId --output text)
+helm upgrade --install aws-vpc-cni aws-vpc-cni --repo https://aws.github.io/eks-charts \
+  --version 1.22.4 --namespace kube-system --kube-context eks-gitops-lab \
+  -f helm/aws-vpc-cni.values.yaml --set-string "env.VPC_ID=$vpc" \
+  --take-ownership --server-side=false --wait --timeout 5m
+kubectl --context eks-gitops-lab -n kube-system rollout status daemonset/aws-node
+
+helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
+  --version v1.21.3 --namespace cert-manager --create-namespace --kube-context eks-gitops-lab \
+  -f helm/cert-manager.values.yaml --wait --timeout 5m
+```
+
+The cert-manager chart keeps its CRDs and upgrades the existing release in place. It supports in-cluster certificate exercises. The public Go app uses its ACM certificate on the ALB.
+
+### Restore the load balancer and Go app
+
 A new cluster has a new OIDC issuer. Register it and point the existing load balancer controller role at it.
 
 ```sh

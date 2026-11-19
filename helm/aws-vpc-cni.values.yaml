@@ -1,0 +1,16 @@
+# Match the EKS bootstrap DaemonSet selector so Helm can adopt it in place.
+originalMatchLabels: true
+image:
+  region: us-east-1
+  tag: v1.22.4-eksbuild.10
+init:
+  image:
+    region: us-east-1
+    tag: v1.22.4-eksbuild.10
+nodeAgent:
+  image:
+    region: us-east-1
+    tag: v1.4.0-eksbuild.1
+env:
+  ANNOTATE_POD_IP: "false"
+  CLUSTER_NAME: eks-gitops-lab
