@@ -28,7 +28,7 @@ spec:
               app.kubernetes.io/name: go-node-info
       containers:
         - name: go-node-info
-          image: 352243450529.dkr.ecr.us-east-1.amazonaws.com/go-node-info@sha256:560ac1fd08f45ee3d628f9c4b59667791efbd52905d32950f06b79f8b99a77fa
+          image: 352243450529.dkr.ecr.us-east-1.amazonaws.com/go-node-info@sha256:c2a197d2d952b9d3d7adefb7d6e11ce635b219c886a15481cbc3e26f150448e9
           ports:
             - name: http
               containerPort: 8080
