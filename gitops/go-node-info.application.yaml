@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: go-node-info
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Stevendylan01/eks-gitops-lab.git
+    targetRevision: deploy/go-node-info
+    path: gitops/apps/go-node-info
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: go-node-info
+  syncPolicy:
+    automated:
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
