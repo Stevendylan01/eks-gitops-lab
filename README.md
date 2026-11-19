@@ -21,26 +21,63 @@ The `infra/eks` Terraform root has its own state. It creates an EKS cluster with
 
 Apply `infra/bootstrap` first to create the dedicated EKS operator role. It trusts `AdminUser` by default and its AWS policy allows describing only this cluster. Copy `infra/eks/local.tfvars.example` to `infra/eks/local.tfvars`. Set your public IPv4 address with a `/32` suffix and use the output of `terraform -chdir=infra/bootstrap output -raw eks_operator_role_arn` as the principal ARN. The EKS root grants that role Kubernetes cluster-admin through an access entry.
 
-```sh
-cd infra/eks
-terraform init
-terraform plan -var-file=local.tfvars -out=eks.tfplan
-terraform apply eks.tfplan
-```
+### Tear down
 
-Configure an AWS CLI profile named `eks-lab-operator` with the operator role ARN as `role_arn` and your authenticated `AdminUser` profile as `source_profile`. Use it to configure and verify access.
+Run from the repository root. Remove the Argo CD Application first so it cannot recreate the Ingress. Wait for the Ingress deletion to finish and confirm the lab ALB has disappeared before running Terraform.
 
 ```sh
-aws eks update-kubeconfig --profile eks-lab-operator --region us-east-1 --name eks-gitops-lab
-kubectl get nodes -L topology.kubernetes.io/zone
-kubectl get pods -n kube-system
+kubectl --context eks-gitops-lab -n argocd delete application go-node-info --ignore-not-found
+kubectl --context eks-gitops-lab -n go-node-info delete ingress go-node-info --ignore-not-found --timeout=5m
+aws elbv2 describe-load-balancers --region us-east-1 --query 'LoadBalancers[].DNSName'
+terraform -chdir=infra/eks destroy -var-file=local.tfvars
 ```
 
-The worker and egress capacity in each AZ give the app somewhere to run during an AZ failure. The application still needs ready replicas spread across both AZs. Install and validate that separately.
+The EKS Terraform root includes the cluster, workers, NAT gateways, public IPs, and VPC. The separate bootstrap IAM resources, load balancer controller role and policy, ECR images, and ACM certificate stay available. ECR storage can still incur charges.
 
-When done, review and apply a destroy plan from `infra/eks`. Remove any Kubernetes services or ingress that provision AWS load balancers before destroying the cluster. The ECR repository and publishing role are in `infra/bootstrap`.
+### Rebuild
+
+Use the infrastructure AWS profile for Terraform and IAM commands. If the operator session has expired, refresh it with `aws login --profile eks-lab-admin --remote`.
 
 ```sh
-terraform plan -destroy -var-file=local.tfvars -out=eks-destroy.tfplan
-terraform apply eks-destroy.tfplan
+terraform -chdir=infra/eks init
+terraform -chdir=infra/eks apply -var-file=local.tfvars
+aws eks update-kubeconfig --profile eks-lab-operator --region us-east-1 --name eks-gitops-lab --alias eks-gitops-lab
 ```
+
+A new cluster has a new OIDC issuer. Register it and point the existing load balancer controller role at it.
+
+```sh
+issuer=$(aws eks describe-cluster --region us-east-1 --name eks-gitops-lab --query cluster.identity.oidc.issuer --output text)
+provider=$(aws iam create-open-id-connect-provider --url "$issuer" --client-id-list sts.amazonaws.com --query OpenIDConnectProviderArn --output text)
+aws iam update-assume-role-policy --role-name eks-gitops-lab-lbc --policy-document "$(
+  jq -n --arg provider "$provider" --arg issuer "${issuer#https://}" '
+    {Version:"2012-10-17",Statement:[{
+      Effect:"Allow",Principal:{Federated:$provider},Action:"sts:AssumeRoleWithWebIdentity",
+      Condition:{StringEquals:{($issuer+":aud"):"sts.amazonaws.com",
+        ($issuer+":sub"):"system:serviceaccount:kube-system:aws-load-balancer-controller"}}
+    }]}'
+)"
+```
+
+Install the controller and Argo CD, then apply the existing Application.
+
+```sh
+vpc=$(aws eks describe-cluster --region us-east-1 --name eks-gitops-lab --query cluster.resourcesVpcConfig.vpcId --output text)
+role=$(aws iam get-role --role-name eks-gitops-lab-lbc --query Role.Arn --output text)
+helm upgrade --install aws-load-balancer-controller aws-load-balancer-controller \
+  --repo https://aws.github.io/eks-charts --version 3.6.3 --namespace kube-system \
+  --set clusterName=eks-gitops-lab --set region=us-east-1 --set "vpcId=$vpc" \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set-string "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$role" \
+  --set featureGates.ALBGatewayAPI=false --set featureGates.NLBGatewayAPI=false \
+  --set enableServiceMutatorWebhook=false --wait
+
+kubectl create namespace argocd
+kubectl -n argocd apply --server-side --force-conflicts \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.6.2/manifests/install.yaml
+kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=2m
+kubectl apply -f gitops/go-node-info.application.yaml
+kubectl -n go-node-info get ingress go-node-info
+```
+
+Once the Ingress shows an address, update the Cloudflare CNAME for `go.stevenslab.net` to that address. The Ingress reuses the existing ACM certificate.
